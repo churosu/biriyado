@@ -440,7 +440,7 @@ function simulateShot(angle,power,cuePlace){
   while(!allStopped()&&steps<4000){
     physicsStep(ev,steps);
     const snap=[];
-    for(const b of balls)snap.push(Math.round(b.x*10)/10,Math.round(b.y*10)/10);
+    for(const b of balls)snap.push(Math.round(b.x*10)/10,Math.round(b.y*10)/10,b.potted?1:0);
     frames.push(snap);steps++;
   }
   const result=evaluateShot(ev);
@@ -705,7 +705,7 @@ function startPlayback(frames,result,finalState,sounds){
 function stepPlayback(){
   if(!playbackFrames)return;
   const fr=playbackFrames[playbackIdx];
-  if(fr)for(let i=0;i<balls.length;i++){balls[i].x=fr[i*2];balls[i].y=fr[i*2+1];}
+  if(fr)for(let i=0;i<balls.length;i++){balls[i].x=fr[i*3];balls[i].y=fr[i*3+1];balls[i].potted=fr[i*3+2]===1;}
   while(playbackSoundI<playbackSounds.length&&playbackSounds[playbackSoundI].f<=playbackIdx){
     playShotSfx(playbackSounds[playbackSoundI]);playbackSoundI++;
   }
