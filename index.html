@@ -123,6 +123,14 @@
     border-color:transparent;font-weight:800;}
   .foot{font-size:11px;color:#6e5e49;margin-top:14px;letter-spacing:.04em;text-align:center;}
   .disc{color:#c98b6b;}
+  #testPanel{position:fixed;left:0;right:0;bottom:0;z-index:60;background:rgba(20,16,11,.96);
+    border-top:2px solid var(--brass);padding:8px 10px;box-shadow:0 -6px 20px rgba(0,0,0,.5);}
+  .tphdr{font-size:12px;color:var(--brass);text-align:center;margin-bottom:7px;letter-spacing:.03em;}
+  #testAnomalyBtns{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;max-height:128px;overflow-y:auto;}
+  .testbtn{font-size:12px;padding:6px 10px;border-radius:8px;border:1px solid #50402c;
+    background:#2a2018;color:var(--cream);cursor:pointer;white-space:nowrap;transition:all .12s;}
+  .testbtn:hover{background:#3a2c1e;border-color:var(--brass);}
+  .testbtn.sel{background:var(--brass);color:#1a120a;border-color:var(--brass);font-weight:bold;}
 </style>
 </head>
 <body>
@@ -214,6 +222,11 @@
   <div class="foot" id="connFoot"></div>
 </div>
 
+<div id="testPanel" style="display:none;">
+  <div class="tphdr">🧪 テストルーム — 次のショットで発生させる異常</div>
+  <div id="testAnomalyBtns"></div>
+</div>
+
 <script>
 "use strict";
 /* =========================================================
@@ -225,7 +238,7 @@
 
 // ---------- テーブル寸法 ----------
 const W=960,H=520,RAIL=46,PL=RAIL,PR=W-RAIL,PT=RAIL,PB=H-RAIL,PW=PR-PL,PH=PB-PT;
-const R=12.5,POCKET=R*1.75,CUSHION_E=0.86,BALL_E=0.95,FRICTION=0.988,STOP_V=0.06,MAX_POWER=26;
+const R=12.5,POCKET=R*1.75,CUSHION_E=0.946,BALL_E=0.95,FRICTION=0.9844,STOP_V=0.06,MAX_POWER=36.4;
 const POCKETS=[{x:PL,y:PT},{x:(PL+PR)/2,y:PT-4},{x:PR,y:PT},{x:PL,y:PB},{x:(PL+PR)/2,y:PB+4},{x:PR,y:PB}];
 const BASE={1:"#f5c518",2:"#1f5fc4",3:"#d62b2b",4:"#6a2f8e",5:"#e3691c",6:"#1f9d4d",7:"#8a2230",8:"#161616"};
 function ballColor(id){return id===8?"#161616":BASE[id<=8?id:id-8];}
@@ -239,8 +252,8 @@ let playerNames=["P1","P2"];
 let phase="lobby";    // lobby | aiming | animating | waiting | over | ultselect
 let playbackFrames=null,playbackIdx=0,pendingResult=null,playbackSounds=[],playbackSoundI=0;
 // アルティメット9：盤面異常（アノマリー）
-let currentAnomaly=null,turnCount=0,nextAnomalyTurn=99;
-let activePockets=POCKETS.map(p=>({x:p.x,y:p.y,r:POCKET})),lockedBall=-1;
+let currentAnomaly=null,turnCount=0,nextAnomalyTurn=99,forcedAnomaly=null;
+let activePockets=POCKETS.map(p=>({x:p.x,y:p.y,r:POCKET})),lockedBall=-1,cueRadius=R,friction=FRICTION,cushionE=CUSHION_E;
 
 // ---------- ラック ----------
 function shuffle(a){for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;}
@@ -284,6 +297,22 @@ function lowestTarget(){const rem=balls.filter(b=>!b.potted&&b.id!==0);return re
 //  - apply(params) : instant異常の盤面変更（発生時に1度だけ実行）
 // =========================================================
 function defaultPockets(){return POCKETS.map(p=>({x:p.x,y:p.y,r:POCKET}));}
+// ローテーション：穴が縁に沿って時計回りに移動する経路（6つの定位置を時計回り順に）
+const ROT_STATIONS=[
+  {x:PL,y:PT},{x:(PL+PR)/2,y:PT-4},{x:PR,y:PT},
+  {x:PR,y:PB},{x:(PL+PR)/2,y:PB+4},{x:PL,y:PB}
+];
+function rotatedPockets(prog){
+  const out=[];
+  for(let k=0;k<6;k++){
+    const a=ROT_STATIONS[k],b=ROT_STATIONS[(k+1)%6];
+    out.push({x:a.x+(b.x-a.x)*prog,y:a.y+(b.y-a.y)*prog,r:POCKET});
+  }
+  return out;
+}
+let rotStart=0;
+function nowMs(){return typeof performance!=="undefined"?performance.now():Date.now();}
+function rotationProg(){return ((nowMs()-rotStart)/2000)%1;} // 隣の穴まで約2秒
 function centerOccupied(){return balls.some(b=>!b.potted&&Math.hypot(b.x-W/2,b.y-H/2)<POCKET*2+R);}
 function findCenterSpot(){
   const cx=W/2,cy=H/2;
@@ -323,6 +352,52 @@ const ANOMALIES={
     roll:()=>{const c=balls.filter(b=>b.potted&&b.id!==0);return {ballId:c[Math.floor(Math.random()*c.length)].id};},
     apply:(p)=>{const b=balls.find(x=>x.id===p.ballId);if(b){b.potted=false;const s=findCenterSpot();b.x=s.x;b.y=s.y;b.vx=0;b.vy=0;}},
   },
+  big:{
+    name:"ビッグ",desc:"手球の大きさが2倍",kind:"transient",
+    // 手球を2倍にしても他の球と干渉しない時のみ発動可能
+    canTrigger:()=>{const c=balls.find(b=>b.id===0&&!b.potted);return !!c&&!balls.some(b=>b.id!==0&&!b.potted&&Math.hypot(b.x-c.x,b.y-c.y)<3*R);},
+    cueRadius:()=>2*R,
+  },
+  smash:{
+    name:"スマッシュ",desc:"ショットの強さ（上限）が2倍",kind:"transient",
+    powerMul:()=>2,
+  },
+  change:{
+    name:"チェンジ",desc:"手球とランダムな球の位置を入れ替え",kind:"instant",
+    canTrigger:()=>balls.some(b=>b.id!==0&&!b.potted),
+    roll:()=>{const c=balls.filter(b=>b.id!==0&&!b.potted);return {ballId:c[Math.floor(Math.random()*c.length)].id};},
+    apply:(p)=>{
+      const cb=balls.find(b=>b.id===0),t=balls.find(b=>b.id===p.ballId);
+      if(cb&&t){const x=cb.x,y=cb.y;cb.x=t.x;cb.y=t.y;t.x=x;t.y=y;cb.vx=cb.vy=t.vx=t.vy=0;}
+    },
+  },
+  shuffle:{
+    name:"シャッフル",desc:"手球以外の全ての球の位置をランダムに交換",kind:"instant",
+    canTrigger:()=>balls.filter(b=>b.id!==0&&!b.potted).length>=2,
+    apply:()=>{
+      const others=balls.filter(b=>b.id!==0&&!b.potted);
+      const pos=shuffle(others.map(b=>({x:b.x,y:b.y})));
+      others.forEach((b,i)=>{b.x=pos[i].x;b.y=pos[i].y;b.vx=0;b.vy=0;});
+    },
+  },
+  rotation:{
+    name:"ローテーション",desc:"穴が時計回りに移動（撞いた瞬間に位置が決定）",kind:"transient",
+    pockets:(p)=>rotatedPockets((p&&p.prog!=null)?p.prog:0),
+  },
+  iceground:{
+    name:"アイスグランド",desc:"盤面が凍結し摩擦が1/4に（よく滑る）",kind:"transient",
+    friction:()=>1-(1-FRICTION)/4,
+  },
+  hellhole:{
+    name:"ヘルホール",desc:"中央の地獄の穴に球が落ちるとファウル",kind:"transient",
+    // 中央(穴の生成位置)に球がない時のみ発動可能
+    canTrigger:()=>!balls.some(b=>!b.potted&&Math.hypot(b.x-W/2,b.y-H/2)<POCKET*1.3+R),
+    pockets:()=>{const ps=defaultPockets();ps.push({x:W/2,y:H/2,r:POCKET*1.3,hell:true});return ps;},
+  },
+  bounce:{
+    name:"バウンス",desc:"壁の反発が強化されてよく跳ねる",kind:"transient",
+    cushionE:()=>Math.min(0.99,CUSHION_E*2),
+  },
 };
 function initAnomaly(){currentAnomaly=null;turnCount=0;nextAnomalyTurn=1+Math.floor(Math.random()*5);}
 // そのショットの物理に異常を反映（simulate/dryRun の前後で呼ぶ）
@@ -331,11 +406,24 @@ function setupAnomalyPhysics(an){
     const d=ANOMALIES[an.type];
     activePockets=d.pockets?d.pockets(an.params):defaultPockets();
     lockedBall=d.lockBall?d.lockBall(an.params):-1;
-  }else{activePockets=defaultPockets();lockedBall=-1;}
+    cueRadius=d.cueRadius?d.cueRadius():R;
+    friction=d.friction?d.friction():FRICTION;
+    cushionE=d.cushionE?d.cushionE():CUSHION_E;
+  }else{activePockets=defaultPockets();lockedBall=-1;cueRadius=R;friction=FRICTION;cushionE=CUSHION_E;}
+}
+// ショットのパワー倍率（スマッシュ等）
+function shotPowerMul(){
+  if(gameMode==="ultimate9"&&currentAnomaly){const d=ANOMALIES[currentAnomaly.type];if(d&&d.powerMul)return d.powerMul();}
+  return 1;
 }
 // 描画用：今表示すべき穴
 function displayPockets(){
   if(gameMode==="ultimate9"&&currentAnomaly&&!gameOver){
+    if(currentAnomaly.type==="rotation"){
+      const p=currentAnomaly.params;
+      // 撞く前はリアルタイム回転、撞いた後は確定した位置で固定
+      return rotatedPockets((p&&p.prog!=null)?p.prog:rotationProg());
+    }
     const d=ANOMALIES[currentAnomaly.type];
     if(d&&d.pockets)return d.pockets(currentAnomaly.params);
   }
@@ -344,6 +432,7 @@ function displayPockets(){
 // 次ターンの異常を決定（権威側＝ホスト/ソロのみが呼ぶ）。instant異常はここで盤面に適用。
 function decideNextAnomaly(){
   if(gameMode!=="ultimate9")return null;
+  if(role==="test")return null; // テストルームはボタンで制御（applyResult側で適用）
   turnCount++;
   if(turnCount<nextAnomalyTurn)return null;
   nextAnomalyTurn=turnCount+1+Math.floor(Math.random()*5);
@@ -354,79 +443,107 @@ function decideNextAnomaly(){
   if(d.kind==="instant"&&d.apply)d.apply(params);
   return {type,params,name:d.name,desc:d.desc};
 }
+// テストルーム：ボタンで選んだ異常を次のBOTショットに適用
+function applyForcedAnomalyForTest(){
+  if(forcedAnomaly){
+    const k=forcedAnomaly,d=ANOMALIES[k];
+    if(d&&(!d.canTrigger||d.canTrigger())){
+      const params=d.roll?d.roll():{};
+      currentAnomaly={type:k,params,name:d.name,desc:d.desc};
+      if(k==="rotation")rotStart=nowMs();
+      if(d.kind==="instant"&&d.apply)d.apply(params); // 盤面を即変更（次ショットへ反映）
+      setCenterText("⚡ 異常発生："+d.name+"（"+d.desc+"）");
+    }else{currentAnomaly=null;if(d)setCenterText("「"+d.name+"」は今は発動条件を満たしません");}
+    forcedAnomaly=null;
+  }else{currentAnomaly=null;}
+  updateHUD();
+}
 
 // ---------- 物理 ----------
 function physicsStep(ev,step){
-  // 移動 + 摩擦（固定球は動かさない）
+  // 最大速度に応じて移動を細分化（高速時のすり抜け＝トンネリングを防ぐ）
+  let maxv=0;
+  for(const b of balls){if(!b.potted&&b.id!==lockedBall){const v=Math.hypot(b.vx,b.vy);if(v>maxv)maxv=v;}}
+  const sub=Math.min(12,Math.max(1,Math.ceil(maxv/(R*0.5)))),f=1/sub;
+  for(let s=0;s<sub;s++){
+    // 移動（このサブステップ分だけ）
+    for(const b of balls){
+      if(b.potted||b.id===lockedBall)continue;
+      b.x+=b.vx*f;b.y+=b.vy*f;
+    }
+    // ポケット（中心へ吸い込んでから落とす・固定球は落ちない）
+    for(const b of balls){
+      if(b.potted||b.id===lockedBall)continue;
+      for(const p of activePockets){
+        const dd=Math.hypot(b.x-p.x,b.y-p.y);
+        if(dd<p.r){
+          if(dd<R*0.55){
+            b.potted=true;b.vx=0;b.vy=0;ev.potted.push(b.id);
+            if(p.hell)(ev.hellPotted=ev.hellPotted||[]).push(b.id); // 地獄の穴に落ちた
+            ev.sounds.push({f:step,type:"pocket",v:1});
+          }else{
+            const nx=(p.x-b.x)/dd,ny=(p.y-b.y)/dd,spd=Math.max(Math.hypot(b.vx,b.vy),4);
+            b.vx=nx*spd;b.vy=ny*spd;
+          }
+          break;
+        }
+      }
+    }
+    // クッション（手球はビッグ時に半径が大きい・吸い込み中は反射させない・バウンス時はよく跳ねる）
+    for(const b of balls){
+      if(b.potted||b.id===lockedBall)continue;
+      if(activePockets.some(p=>Math.hypot(b.x-p.x,b.y-p.y)<p.r))continue;
+      const rr=b.id===0?cueRadius:R;
+      let hit=0,sp=0;
+      if(b.x<PL+rr){b.x=PL+rr;sp=Math.abs(b.vx);b.vx=-b.vx*cushionE;hit=1;}
+      if(b.x>PR-rr){b.x=PR-rr;sp=Math.abs(b.vx);b.vx=-b.vx*cushionE;hit=1;}
+      if(b.y<PT+rr){b.y=PT+rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*cushionE;hit=1;}
+      if(b.y>PB-rr){b.y=PB-rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*cushionE;hit=1;}
+      if(hit&&sp>1.6)ev.sounds.push({f:step,type:"rail",v:Math.min(1,sp/12)});
+    }
+    // ボール間衝突（手球はビッグ時に半径が大きい）
+    for(let i=0;i<balls.length;i++){
+      const a=balls[i];if(a.potted)continue;
+      for(let j=i+1;j<balls.length;j++){
+        const b=balls[j];if(b.potted)continue;
+        const ra=a.id===0?cueRadius:R,rb=b.id===0?cueRadius:R,rs=ra+rb;
+        let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);
+        if(d>0&&d<rs){
+          const aL=a.id===lockedBall,bL=b.id===lockedBall;
+          if(aL&&bL)continue;
+          if(aL||bL){
+            // 固定球（壁化）との衝突：動く球だけ反射
+            const mv=aL?b:a,fx=aL?a:b;
+            const nx=(mv.x-fx.x)/d,ny=(mv.y-fx.y)/d,ov=rs-d;
+            mv.x+=nx*ov;mv.y+=ny*ov;
+            const vn=mv.vx*nx+mv.vy*ny;
+            if(vn<0){
+              mv.vx-=(1+BALL_E)*vn*nx;mv.vy-=(1+BALL_E)*vn*ny;
+              if(mv.id===0&&ev.firstHit==null)ev.firstHit=fx.id;
+              if(-vn>0.5)ev.sounds.push({f:step,type:"click",v:Math.min(1,-vn/14)});
+            }
+            continue;
+          }
+          const nx=dx/d,ny=dy/d,ov=(rs-d)/2;
+          a.x-=nx*ov;a.y-=ny*ov;b.x+=nx*ov;b.y+=ny*ov;
+          const va=a.vx*nx+a.vy*ny,vb=b.vx*nx+b.vy*ny;
+          if(va-vb>0){
+            const imp=(va-vb)*BALL_E;
+            a.vx-=imp*nx;a.vy-=imp*ny;b.vx+=imp*nx;b.vy+=imp*ny;
+            if(a.id===0&&ev.firstHit==null)ev.firstHit=b.id;
+            else if(b.id===0&&ev.firstHit==null)ev.firstHit=a.id;
+            if(va-vb>0.5)ev.sounds.push({f:step,type:"click",v:Math.min(1,(va-vb)/14)});
+          }
+        }
+      }
+    }
+  }
+  // 摩擦＋停止判定（1フレームに1回・アイスグランド時は摩擦が弱い）
   for(const b of balls){
     if(b.potted)continue;
     if(b.id===lockedBall){b.vx=0;b.vy=0;continue;}
-    b.x+=b.vx;b.y+=b.vy;b.vx*=FRICTION;b.vy*=FRICTION;
+    b.vx*=friction;b.vy*=friction;
     if(Math.hypot(b.vx,b.vy)<STOP_V){b.vx=0;b.vy=0;}
-  }
-  // ポケット（中心へ吸い込んでから落とす・固定球は落ちない）
-  for(const b of balls){
-    if(b.potted||b.id===lockedBall)continue;
-    for(const p of activePockets){
-      const dd=Math.hypot(b.x-p.x,b.y-p.y);
-      if(dd<p.r){
-        if(dd<R*0.55){
-          b.potted=true;b.vx=0;b.vy=0;ev.potted.push(b.id);
-          ev.sounds.push({f:step,type:"pocket",v:1});
-        }else{
-          // ポケット中心へ引き込む（縁で消えず奥まで転がる）
-          const nx=(p.x-b.x)/dd,ny=(p.y-b.y)/dd,spd=Math.max(Math.hypot(b.vx,b.vy),4);
-          b.vx=nx*spd;b.vy=ny*spd;
-        }
-        break;
-      }
-    }
-  }
-  // クッション（ポケットに吸い込まれ中の球は反射させない）
-  for(const b of balls){
-    if(b.potted||b.id===lockedBall)continue;
-    if(activePockets.some(p=>Math.hypot(b.x-p.x,b.y-p.y)<p.r))continue;
-    let hit=0,sp=0;
-    if(b.x<PL+R){b.x=PL+R;sp=Math.abs(b.vx);b.vx=-b.vx*CUSHION_E;hit=1;}
-    if(b.x>PR-R){b.x=PR-R;sp=Math.abs(b.vx);b.vx=-b.vx*CUSHION_E;hit=1;}
-    if(b.y<PT+R){b.y=PT+R;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*CUSHION_E;hit=1;}
-    if(b.y>PB-R){b.y=PB-R;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*CUSHION_E;hit=1;}
-    if(hit&&sp>1.6)ev.sounds.push({f:step,type:"rail",v:Math.min(1,sp/12)});
-  }
-  // ボール間衝突
-  for(let i=0;i<balls.length;i++){
-    const a=balls[i];if(a.potted)continue;
-    for(let j=i+1;j<balls.length;j++){
-      const b=balls[j];if(b.potted)continue;
-      let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);
-      if(d>0&&d<2*R){
-        const aL=a.id===lockedBall,bL=b.id===lockedBall;
-        if(aL&&bL)continue;
-        if(aL||bL){
-          // 固定球（壁化）との衝突：動く球だけ反射
-          const mv=aL?b:a,fx=aL?a:b;
-          const nx=(mv.x-fx.x)/d,ny=(mv.y-fx.y)/d,ov=2*R-d;
-          mv.x+=nx*ov;mv.y+=ny*ov;
-          const vn=mv.vx*nx+mv.vy*ny;
-          if(vn<0){
-            mv.vx-=(1+BALL_E)*vn*nx;mv.vy-=(1+BALL_E)*vn*ny;
-            if(mv.id===0&&ev.firstHit==null)ev.firstHit=fx.id;
-            if(-vn>0.5)ev.sounds.push({f:step,type:"click",v:Math.min(1,-vn/14)});
-          }
-          continue;
-        }
-        const nx=dx/d,ny=dy/d,ov=(2*R-d)/2;
-        a.x-=nx*ov;a.y-=ny*ov;b.x+=nx*ov;b.y+=ny*ov;
-        const va=a.vx*nx+a.vy*ny,vb=b.vx*nx+b.vy*ny;
-        if(va-vb>0){
-          const imp=(va-vb)*BALL_E;
-          a.vx-=imp*nx;a.vy-=imp*ny;b.vx+=imp*nx;b.vy+=imp*ny;
-          if(a.id===0&&ev.firstHit==null)ev.firstHit=b.id;
-          else if(b.id===0&&ev.firstHit==null)ev.firstHit=a.id;
-          if(va-vb>0.5)ev.sounds.push({f:step,type:"click",v:Math.min(1,(va-vb)/14)});
-        }
-      }
-    }
   }
 }
 function allStopped(){return balls.every(b=>b.potted||(b.vx===0&&b.vy===0));}
@@ -460,8 +577,9 @@ function evaluateShot(ev){return (gameMode==="nine"||gameMode==="ultimate9")?eva
 // ナインボール：常に最小番号の球に先に当てる。9番を落とせば勝ち。
 function evaluateNine(ev){
   const shooter=current,opp=shooter^1,potted=ev.potted.slice();
+  const hellPotted=(ev.hellPotted||[]).slice();
   const cuePotted=potted.includes(0);
-  const ninePotted=potted.includes(9);
+  const ninePotted=potted.includes(9)&&!hellPotted.includes(9); // 地獄落ちの9番は勝利にならない
   const firstHit=ev.firstHit;
   const before=balls.filter(b=>(!b.potted||potted.includes(b.id))&&b.id!==0);
   const lowest=before.length?Math.min(...before.map(b=>b.id)):9;
@@ -469,8 +587,16 @@ function evaluateNine(ev){
   if(firstHit==null){foul=true;reason="空振り（何にも当たらず）";}
   else if(firstHit!==lowest){foul=true;reason="最小番号の "+lowest+"番 に先に当てていない";}
   if(cuePotted){foul=true;reason="スクラッチ（手球ポケットイン）";}
+  if(hellPotted.length){foul=true;reason="地獄の穴に球が落ちた";}
+  // 地獄の穴に落ちた球は盤面へ復活（9番含む）
+  for(const id of hellPotted){
+    if(id===0)continue;
+    const b=balls.find(x=>x.id===id);
+    if(b){b.potted=false;const s=findCenterSpot();b.x=s.x;b.y=s.y;b.vx=0;b.vy=0;}
+    const i=potted.indexOf(id);if(i>=0)potted.splice(i,1);
+  }
   if(ninePotted&&!foul)return mkResult(false,shooter,true,shooter,"9番ポケットイン！",potted);
-  if(ninePotted&&foul){
+  if(potted.includes(9)&&foul){ // 通常穴で9番が落ちてファウル → リスポット
     const b9=balls.find(b=>b.id===9);
     b9.potted=false;b9.x=PL+PW*0.66;b9.y=(PT+PB)/2;
     const i=potted.indexOf(9);if(i>=0)potted.splice(i,1);
@@ -527,14 +653,36 @@ function mkResult(foul,nextPlayer,over,win,reason,potted){
 }
 function applyResult(res){
   current=res.nextPlayer;groups={0:res.groups[0],1:res.groups[1]};ballInHand=res.ballInHand;isBreak=false;
-  if(gameMode==="ultimate9")currentAnomaly=res.anomaly||null;
-  if(res.over){gameOver=true;winner=res.winner;phase="over";showRematch();}
+  if(gameMode==="ultimate9"){
+    currentAnomaly=res.anomaly||null;
+    if(currentAnomaly&&currentAnomaly.type==="rotation"){currentAnomaly.params=currentAnomaly.params||{};rotStart=nowMs();}
+  }
+  if(res.over){gameOver=true;winner=res.winner;phase="over";showRematch();
+    if(role==="test")setTimeout(()=>{if(role==="test")startTestRoom();},2600); // 連続観戦
+  }
   else{phase=(myIndex>=0&&current===myIndex)?"aiming":"waiting";}
   updateHUD();setCenter(res);
   if(gameMode==="ultimate9"&&currentAnomaly&&!gameOver){
     setCenterText("⚡ 異常発生："+currentAnomaly.name+"（"+currentAnomaly.desc+"）");
   }
   if(role==="solo"&&!gameOver&&current===1){if(!currentAnomaly)setCenterText("CPU が狙っています…");setTimeout(aiTakeShot,750);}
+  if(role==="test"&&!gameOver){
+    applyForcedAnomalyForTest(); // ボタンで選ばれた異常を次のショットに反映
+    setTimeout(()=>{if(role==="test"&&!gameOver&&phase!=="animating")aiTakeShot();},1000);
+  }
+  // ホスト：再生中に保留したクライアントのショットを、手番確定後に処理
+  if(role==="host")processPendingShot();
+}
+// 保留ショットの処理（ホストの描画＝再生が完全に終わってから実行される）
+function processPendingShot(){
+  if(role!=="host"||!pendingShot||phase==="animating"||gameOver)return;
+  const ps=pendingShot;pendingShot=null;
+  if(playerSlots[current]!==ps.cid)return;   // 現在の手番のプレイヤーからの送信でなければ破棄
+  if(myIndex===current)return;               // ホスト自身の手番ならホストが撞く
+  if(currentAnomaly&&currentAnomaly.type==="rotation"){currentAnomaly.params=currentAnomaly.params||{};currentAnomaly.params.prog=(ps.prog!=null?ps.prog:0);}
+  const out=simulateShot(ps.angle,ps.power,ps.cue);
+  broadcast({t:"result",frames:out.frames,result:out.result,finalState:out.finalState,sounds:out.sounds});
+  startPlayback(out.frames,out.result,out.finalState,out.sounds);
 }
 
 // =========================================================
@@ -551,7 +699,7 @@ function dryRunShot(angle,power){
   const ev={potted:[],firstHit:null,sounds:[]};
   let steps=0;
   while(!allStopped()&&steps<4000){physicsStep(ev,steps);steps++;}
-  const res={firstHit:ev.firstHit,potted:ev.potted.slice(),cuePotted:ev.potted.includes(0)};
+  const res={firstHit:ev.firstHit,potted:ev.potted.slice(),cuePotted:ev.potted.includes(0),hellPotted:(ev.hellPotted||[]).slice()};
   applyState(saved);
   balls.forEach((b,i)=>{b.vx=sv[i].vx;b.vy=sv[i].vy;});
   setupAnomalyPhysics(null);
@@ -560,7 +708,7 @@ function dryRunShot(angle,power){
 
 // 候補ショットの生成（的球ごとに 直接ポット / 壁反射ヒット / 直接ヒット）
 function genCandidates(targetIds){
-  const out=[],brk=isBreak;
+  const out=[],brk=isBreak,pmax=MAX_POWER*shotPowerMul();
   for(const id of targetIds){
     const t=balls.find(b=>b.id===id&&!b.potted);if(!t)continue;
     // 1) 直接ポット（各ポケット）
@@ -568,7 +716,7 @@ function genCandidates(targetIds){
       const dpx=t.x-p.x,dpy=t.y-p.y,dl=Math.hypot(dpx,dpy);
       const gx=t.x+dpx/dl*2*R,gy=t.y+dpy/dl*2*R;       // ゴーストボール
       const ax=gx-cue.x,ay=gy-cue.y,al=Math.hypot(ax,ay);if(al<1)continue;
-      out.push({ang:Math.atan2(ay,ax),power:brk?MAX_POWER:Math.min(MAX_POWER,8.5+(al+dl)/55),bias:8,errMul:1});
+      out.push({ang:Math.atan2(ay,ax),power:brk?pmax:Math.min(pmax,8.5+(al+dl)/55),bias:8,errMul:1});
     }
     // 2) 手球を壁で反射させて的球に当てる（回り込み／バンク）
     const mirrors=[
@@ -577,12 +725,12 @@ function genCandidates(targetIds){
     ];
     for(const mp of mirrors){
       const ax=mp.x-cue.x,ay=mp.y-cue.y,al=Math.hypot(ax,ay);if(al<1)continue;
-      out.push({ang:Math.atan2(ay,ax),power:Math.min(MAX_POWER,12+al/45),bias:0,errMul:1.3});
+      out.push({ang:Math.atan2(ay,ax),power:Math.min(pmax,12+al/45),bias:0,errMul:1.3});
     }
     // 3) 的球へ直接ヒット（最低限ファウルを避けるセーフティ）
     {
       const ax=t.x-cue.x,ay=t.y-cue.y,al=Math.hypot(ax,ay);
-      out.push({ang:Math.atan2(ay,ax),power:brk?MAX_POWER:Math.min(MAX_POWER,9+al/60),bias:2,errMul:1});
+      out.push({ang:Math.atan2(ay,ax),power:brk?pmax:Math.min(pmax,9+al/60),bias:2,errMul:1});
     }
   }
   return out;
@@ -593,9 +741,11 @@ function scoreShot(r,targetIds){
   const hit=r.firstHit!=null&&targetIds.includes(r.firstHit);
   s+=hit?30:-120;                       // 目的球に最初に当てる＝最優先（ファウル回避）
   if(r.cuePotted)s-=60;                  // スクラッチ回避
+  if(r.hellPotted&&r.hellPotted.length)s-=200; // 地獄の穴に落とすとファウル → 強く回避
   s+=r.potted.filter(id=>id!==0&&targetIds.includes(id)).length*45; // 目的球ポット
-  if(gameMode==="nine"){
-    if(r.potted.includes(9))s+=(hit&&!r.cuePotted)?300:-150;        // 9番＝勝利球
+  if(gameMode==="nine"||gameMode==="ultimate9"){
+    const nineHell=r.hellPotted&&r.hellPotted.includes(9);
+    if(r.potted.includes(9))s+=(hit&&!r.cuePotted&&!nineHell)?300:-150;  // 9番＝勝利球（地獄落ちは無効）
   }else{
     const eightLegal=targetIds.length===1&&targetIds[0]===8;
     if(r.potted.includes(8))s+=(eightLegal&&hit&&!r.cuePotted)?300:-250;
@@ -623,8 +773,10 @@ function aiPlaceCue(){
 
 function aiTakeShot(){
   if(gameOver||phase==="over")return;
+  // ローテーション中は「ショットを打つ瞬間」の穴の位置でポケットを確定する
+  if(gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="rotation"){currentAnomaly.params=currentAnomaly.params||{};currentAnomaly.params.prog=rotationProg();}
   if(ballInHand){aiPlaceCue();ballInHand=false;}
-  const targetIds=targetBalls(1);
+  const targetIds=targetBalls(current);
   if(!targetIds.length){doShot(Math.random()*6.28,MAX_POWER*0.5);return;}
   const cand=genCandidates(targetIds);
   let best=null,bestScore=-1e9;
@@ -638,7 +790,7 @@ function aiTakeShot(){
     doShot(t?Math.atan2(t.y-cue.y,t.x-cue.x):Math.random()*6.28,MAX_POWER*0.55);return;
   }
   const ang=best.ang+(Math.random()-0.5)*AI_ERR*2*best.errMul;
-  const power=Math.min(MAX_POWER,best.power*(1+(Math.random()-0.5)*0.08));
+  const power=Math.min(MAX_POWER*shotPowerMul(),best.power*(1+(Math.random()-0.5)*0.08));
   doShot(ang,power);
 }
 
@@ -668,7 +820,11 @@ function onUp(e){
   if(!aim.active)return;aim.active=false;
   const dx=aim.ax-aim.cx,dy=aim.ay-aim.cy,dist=Math.hypot(dx,dy);
   if(dist<8)return;
-  const angle=Math.atan2(dy,dx),power=Math.min(dist/120,1)*MAX_POWER;
+  // ローテーション：撞いた瞬間の穴位置を確定
+  if(gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="rotation"){
+    currentAnomaly.params=currentAnomaly.params||{};currentAnomaly.params.prog=rotationProg();
+  }
+  const angle=Math.atan2(dy,dx),power=Math.min(dist/120,1)*MAX_POWER*shotPowerMul();
   doShot(angle,power);
 }
 function canPlaceCue(x,y){
@@ -686,12 +842,13 @@ cv.addEventListener("touchend",onUp,{passive:false});
 function doShot(angle,power){
   if(ballInHand)ballInHand=false;
   const cuePlace={x:cue.x,y:cue.y};
-  if(role==="host"||role==="solo"){
+  const rotProg=(gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="rotation"&&currentAnomaly.params)?currentAnomaly.params.prog:undefined;
+  if(role==="host"||role==="solo"||role==="test"){
     const out=simulateShot(angle,power,cuePlace);
     broadcast({t:"result",frames:out.frames,result:out.result,finalState:out.finalState,sounds:out.sounds});
     startPlayback(out.frames,out.result,out.finalState,out.sounds);
   }else{
-    sendHost({t:"shot",angle,power,cue:cuePlace});
+    sendHost({t:"shot",angle,power,cue:cuePlace,prog:rotProg});
     phase="waiting";setCenterText("ショット送信中…");
   }
 }
@@ -723,18 +880,32 @@ function render(){
   roundRect(0,0,W,H,18);ctx.fillStyle="#3a2114";ctx.fill();
   roundRect(6,6,W-12,H-12,14);
   const rg=ctx.createLinearGradient(0,0,0,H);
-  rg.addColorStop(0,"#5e3826");rg.addColorStop(.5,"#43261a");rg.addColorStop(1,"#341a10");
+  if(gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="bounce"&&!gameOver){
+    rg.addColorStop(0,"#ffb24d");rg.addColorStop(.5,"#ef6c1a");rg.addColorStop(1,"#c43a0a"); // バウンス（弾むゴム調）
+  }else{
+    rg.addColorStop(0,"#5e3826");rg.addColorStop(.5,"#43261a");rg.addColorStop(1,"#341a10");
+  }
   ctx.fillStyle=rg;ctx.fill();
   roundRect(PL-6,PT-6,PW+12,PH+12,8);
   const fg=ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,W*0.6);
-  fg.addColorStop(0,"#1c7c58");fg.addColorStop(1,"#0e4f38");ctx.fillStyle=fg;ctx.fill();
+  if(gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="iceground"&&!gameOver){
+    fg.addColorStop(0,"#6fdcec");fg.addColorStop(1,"#2a9fc4"); // 凍結（水色）
+  }else{
+    fg.addColorStop(0,"#1c7c58");fg.addColorStop(1,"#0e4f38"); // 通常（緑フェルト）
+  }
+  ctx.fillStyle=fg;ctx.fill();
   ctx.strokeStyle="rgba(255,255,255,.07)";ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(PL+PW*0.26,PT);ctx.lineTo(PL+PW*0.26,PB);ctx.stroke();
   ctx.fillStyle="rgba(255,255,255,.12)";ctx.beginPath();ctx.arc(PL+PW*0.70,(PT+PB)/2,2.2,0,7);ctx.fill();
   const dps=displayPockets(),anomActive=(gameMode==="ultimate9"&&currentAnomaly&&!gameOver);
   for(const p of dps){
-    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,7);ctx.fillStyle="#0a0a0a";ctx.fill();
-    ctx.lineWidth=3;ctx.strokeStyle=anomActive?"rgba(201,162,75,.7)":"rgba(0,0,0,.5)";ctx.stroke();
+    ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,7);ctx.fillStyle=p.hell?"#160000":"#0a0a0a";ctx.fill();
+    if(p.hell){ // 地獄の穴：赤いグロー
+      const hg=ctx.createRadialGradient(p.x,p.y,2,p.x,p.y,p.r);
+      hg.addColorStop(0,"rgba(255,70,30,.6)");hg.addColorStop(.6,"rgba(170,20,0,.35)");hg.addColorStop(1,"rgba(120,0,0,0)");
+      ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,7);ctx.fillStyle=hg;ctx.fill();
+    }
+    ctx.lineWidth=3;ctx.strokeStyle=p.hell?"rgba(230,50,30,.9)":(anomActive?"rgba(201,162,75,.7)":"rgba(0,0,0,.5)");ctx.stroke();
   }
   if(phase==="aiming"&&ballInHand){ctx.fillStyle="rgba(201,162,75,.10)";ctx.fillRect(PL,PT,PW,PH);}
   // 次に入れるべき球をハイライト（自分の手番 / 観戦時は現在のプレイヤー）
@@ -757,8 +928,9 @@ function render(){
   if(phase==="aiming"&&ballInHand)drawPlaceHint();
 }
 function drawBall(b){
-  ctx.beginPath();ctx.arc(b.x+1.5,b.y+2.5,R,0,7);ctx.fillStyle="rgba(0,0,0,.28)";ctx.fill();
-  if(b.id===0){radial(b.x,b.y,"#ffffff","#d9d4c8");spec(b);return;}
+  const rad=(b.id===0&&gameMode==="ultimate9"&&currentAnomaly&&currentAnomaly.type==="big"&&!gameOver)?2*R:R;
+  ctx.beginPath();ctx.arc(b.x+1.5,b.y+2.5,rad,0,7);ctx.fillStyle="rgba(0,0,0,.28)";ctx.fill();
+  if(b.id===0){radial(b.x,b.y,"#ffffff","#d9d4c8",rad);spec(b,rad);return;}
   const col=ballColor(b.id);
   if(ballType(b.id)==="stripe"){
     radial(b.x,b.y,"#fbfbf6","#e6e2d6");
@@ -769,11 +941,12 @@ function drawBall(b){
   ctx.fillStyle="#1a1a1a";ctx.font="bold "+Math.round(R*0.66)+"px Arial";
   ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(b.id,b.x,b.y+0.5);spec(b);
 }
-function spec(b){ctx.beginPath();ctx.arc(b.x-R*0.32,b.y-R*0.34,R*0.22,0,7);ctx.fillStyle="rgba(255,255,255,.55)";ctx.fill();}
-function radial(x,y,inner,outer){
-  const g=ctx.createRadialGradient(x-R*0.3,y-R*0.3,R*0.1,x,y,R);
+function spec(b,rad){rad=rad||R;ctx.beginPath();ctx.arc(b.x-rad*0.32,b.y-rad*0.34,rad*0.22,0,7);ctx.fillStyle="rgba(255,255,255,.55)";ctx.fill();}
+function radial(x,y,inner,outer,rad){
+  rad=rad||R;
+  const g=ctx.createRadialGradient(x-rad*0.3,y-rad*0.3,rad*0.1,x,y,rad);
   g.addColorStop(0,inner);g.addColorStop(1,outer);
-  ctx.beginPath();ctx.arc(x,y,R,0,7);ctx.fillStyle=g;ctx.fill();
+  ctx.beginPath();ctx.arc(x,y,rad,0,7);ctx.fillStyle=g;ctx.fill();
 }
 function shade(hex,f){
   const n=parseInt(hex.slice(1),16);let r=(n>>16)&255,g=(n>>8)&255,b=n&255;
@@ -1084,9 +1257,9 @@ document.getElementById("btnSfx").addEventListener("click",()=>{
 //  P2P（PeerJS）+ 観戦モード
 // =========================================================
 let peer=null,conn=null;          // client: ホストへの接続
-let participants=[],playerSlots=[null,null],myId=null;
+let participants=[],playerSlots=[null,null],myId=null,pendingShot=null;
 let myName="プレイヤー";
-function rid(){const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";for(let i=0;i<6;i++)s+=c[Math.floor(Math.random()*c.length)];return s;}
+function rid(){const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";let s="";do{s="";for(let i=0;i<6;i++)s+=c[Math.floor(Math.random()*c.length)];}while(s==="CHUROS");return s;}
 function broadcast(obj){
   if(role!=="host")return;
   for(const p of participants)if(p.conn&&p.conn.open)p.conn.send(obj);
@@ -1100,9 +1273,34 @@ function startGameUI(){
   lobby.style.display="none";gameEl.style.display="flex";
   document.getElementById("specTag").style.display=(myIndex<0)?"block":"none";
   document.getElementById("btnRematch").style.display="none";
-  let f=role==="solo"?"ソロ（AI対戦）":role==="host"?"ホスト":"接続済み";
-  if(myIndex<0)f+=" · 観戦中";
+  const tp=document.getElementById("testPanel");if(tp)tp.style.display=(role==="test")?"block":"none";
+  let f=role==="solo"?"ソロ（AI対戦）":role==="host"?"ホスト":role==="test"?"テストルーム（BOT対戦）":"接続済み";
+  if(myIndex<0&&role!=="test")f+=" · 観戦中";
   document.getElementById("connFoot").textContent=f;
+}
+// テストルーム：BOT同士の対戦を観戦し、異常を自由に発生させられる
+function startTestRoom(){
+  ensureAudio();
+  role="test";myIndex=-1;myName="観戦";
+  chosenMode="ultimate9";gameMode="ultimate9";
+  playerNames=["BOT-A","BOT-B"];playerSlots=["botA","botB"];
+  document.getElementById("lobbyMenu").style.display="none";
+  rackBalls(gameMode);initAnomaly();
+  current=0;groups={0:null,1:null};gameOver=false;winner=null;ballInHand=false;isBreak=true;forcedAnomaly=null;
+  startGameUI();buildTestPanel();
+  phase="waiting";updateHUD();
+  setCenterText("🧪 BOT対戦テスト — 下のボタンで次のショットの異常を選べます");
+  setTimeout(()=>{if(role==="test"){applyForcedAnomalyForTest();aiTakeShot();}},900);
+}
+function buildTestPanel(){
+  const wrap=document.getElementById("testAnomalyBtns");if(!wrap)return;wrap.innerHTML="";
+  const mk=(label,fn)=>{const b=document.createElement("button");b.className="testbtn";b.textContent=label;
+    b.onclick=()=>{fn();[...wrap.children].forEach(x=>x.classList.remove("sel"));b.classList.add("sel");};return b;};
+  for(const k of Object.keys(ANOMALIES)){
+    wrap.appendChild(mk(ANOMALIES[k].name,()=>{forcedAnomaly=k;setCenterText("⚡ 次のショットで「"+ANOMALIES[k].name+"」が発生します");}));
+  }
+  const rb=mk("ランダムに戻す",()=>{forcedAnomaly=null;setCenterText("異常はランダムに戻りました");});
+  rb.style.opacity="0.8";wrap.appendChild(rb);
 }
 
 // --- ルール選択 ---
@@ -1203,7 +1401,7 @@ document.getElementById("btnStartMatch").addEventListener("click",()=>{
   hostStartMatch(hostSel[0],hostSel[1]);
 });
 function hostStartMatch(id0,id1){
-  playerSlots=[id0,id1];
+  playerSlots=[id0,id1];pendingShot=null;
   rackBalls(chosenMode);initAnomaly();
   const p0=nameOf(id0),p1=nameOf(id1);
   for(const p of participants){
@@ -1227,9 +1425,11 @@ function onHostData(c,m){
     renderHostList();
     broadcast({t:"lobby",players:participants.map(p=>({id:p.id,name:p.name}))});
   }else if(m.t==="shot"){
-    // currentプレイヤーのクライアントからのショットのみ処理
+    // 再生(描画)中に届いたショットは保留し、手番移行が完了してから処理する
+    if(phase==="animating"){pendingShot={cid:c.__id,angle:m.angle,power:m.power,cue:m.cue,prog:m.prog};return;}
     const shooterId=playerSlots[current];
     if(c.__id!==shooterId)return;
+    if(currentAnomaly&&currentAnomaly.type==="rotation"){currentAnomaly.params=currentAnomaly.params||{};currentAnomaly.params.prog=(m.prog!=null?m.prog:0);}
     const out=simulateShot(m.angle,m.power,m.cue);
     broadcast({t:"result",frames:out.frames,result:out.result,finalState:out.finalState,sounds:out.sounds});
     startPlayback(out.frames,out.result,out.finalState,out.sounds);
@@ -1244,6 +1444,8 @@ function onHostData(c,m){
 document.getElementById("btnJoin").addEventListener("click",()=>{
   ensureAudio();
   const code=(document.getElementById("joinInput").value||"").trim().toUpperCase();
+  // テストルーム（隠しコード）：BOT対戦観戦＋異常を自由に発生
+  if(code==="CHUROS"){startTestRoom();return;}
   if(code.length<4){document.getElementById("lobbyStatus").textContent="コードを入力してください";return;}
   role="client";myIndex=-1;myName=readNick();
   document.getElementById("lobbyStatus").textContent="接続中…";
