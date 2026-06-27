@@ -131,6 +131,20 @@
     background:#2a2018;color:var(--cream);cursor:pointer;white-space:nowrap;transition:all .12s;}
   .testbtn:hover{background:#3a2c1e;border-color:var(--brass);}
   .testbtn.sel{background:var(--brass);color:#1a120a;border-color:var(--brass);font-weight:bold;}
+  #cutin{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;opacity:0;}
+  #cutin.show{animation:cutinFade 2s ease-out forwards;}
+  #cutin .band{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);height:128px;
+    background:linear-gradient(90deg,transparent,rgba(18,13,8,.92) 14%,rgba(46,33,18,.96) 50%,rgba(18,13,8,.92) 86%,transparent);
+    border-top:2px solid var(--brass);border-bottom:2px solid var(--brass);box-shadow:0 0 30px rgba(0,0,0,.6);}
+  #cutinName{position:relative;font-size:44px;font-weight:bold;color:var(--brass);
+    text-shadow:0 2px 14px rgba(0,0,0,.85),0 0 22px rgba(201,162,75,.4);letter-spacing:.06em;text-align:center;padding:0 16px;}
+  #cutinDesc{position:relative;font-size:15px;color:var(--cream);margin-top:10px;
+    text-shadow:0 1px 6px rgba(0,0,0,.85);text-align:center;padding:0 24px;}
+  #cutin.show #cutinName{animation:cutinSlide 2s cubic-bezier(.2,.9,.2,1) forwards;}
+  #cutin.show #cutinDesc{animation:cutinSlide2 2s cubic-bezier(.2,.9,.2,1) forwards;}
+  @keyframes cutinFade{0%{opacity:0;}10%{opacity:1;}80%{opacity:1;}100%{opacity:0;}}
+  @keyframes cutinSlide{0%{transform:translateX(-70px) skewX(-8deg);opacity:0;}14%{transform:translateX(0) skewX(0);opacity:1;}80%{transform:translateX(0);opacity:1;}100%{transform:translateX(46px);opacity:0;}}
+  @keyframes cutinSlide2{0%{transform:translateX(70px);opacity:0;}18%{transform:translateX(0);opacity:1;}80%{transform:translateX(0);opacity:1;}100%{transform:translateX(-30px);opacity:0;}}
 </style>
 </head>
 <body>
@@ -225,6 +239,12 @@
 <div id="testPanel" style="display:none;">
   <div class="tphdr">🧪 テストルーム — 次のショットで発生させる異常</div>
   <div id="testAnomalyBtns"></div>
+</div>
+
+<div id="cutin">
+  <div class="band"></div>
+  <div id="cutinName"></div>
+  <div id="cutinDesc"></div>
 </div>
 
 <script>
@@ -391,12 +411,12 @@ const ANOMALIES={
   hellhole:{
     name:"ヘルホール",desc:"中央の地獄の穴に球が落ちるとファウル",kind:"transient",
     // 中央(穴の生成位置)に球がない時のみ発動可能
-    canTrigger:()=>!balls.some(b=>!b.potted&&Math.hypot(b.x-W/2,b.y-H/2)<POCKET*1.3+R),
-    pockets:()=>{const ps=defaultPockets();ps.push({x:W/2,y:H/2,r:POCKET*1.3,hell:true});return ps;},
+    canTrigger:()=>!balls.some(b=>!b.potted&&Math.hypot(b.x-W/2,b.y-H/2)<POCKET*1.95+R),
+    pockets:()=>{const ps=defaultPockets();ps.push({x:W/2,y:H/2,r:POCKET*1.95,hell:true});return ps;},
   },
   bounce:{
-    name:"バウンス",desc:"壁の反発が強化されてよく跳ねる",kind:"transient",
-    cushionE:()=>Math.min(0.99,CUSHION_E*2),
+    name:"バウンス",desc:"壁の反発が2.4倍に強化され大きく跳ねる",kind:"transient",
+    cushionE:()=>CUSHION_E*2.4,
   },
 };
 function initAnomaly(){currentAnomaly=null;turnCount=0;nextAnomalyTurn=1+Math.floor(Math.random()*5);}
@@ -453,6 +473,7 @@ function applyForcedAnomalyForTest(){
       if(k==="rotation")rotStart=nowMs();
       if(d.kind==="instant"&&d.apply)d.apply(params); // 盤面を即変更（次ショットへ反映）
       setCenterText("⚡ 異常発生："+d.name+"（"+d.desc+"）");
+      showAnomalyCutin(currentAnomaly);
     }else{currentAnomaly=null;if(d)setCenterText("「"+d.name+"」は今は発動条件を満たしません");}
     forcedAnomaly=null;
   }else{currentAnomaly=null;}
@@ -495,10 +516,13 @@ function physicsStep(ev,step){
       if(activePockets.some(p=>Math.hypot(b.x-p.x,b.y-p.y)<p.r))continue;
       const rr=b.id===0?cueRadius:R;
       let hit=0,sp=0;
-      if(b.x<PL+rr){b.x=PL+rr;sp=Math.abs(b.vx);b.vx=-b.vx*cushionE;hit=1;}
-      if(b.x>PR-rr){b.x=PR-rr;sp=Math.abs(b.vx);b.vx=-b.vx*cushionE;hit=1;}
-      if(b.y<PT+rr){b.y=PT+rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*cushionE;hit=1;}
-      if(b.y>PB-rr){b.y=PB-rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-b.vy*cushionE;hit=1;}
+      // 反発強化（バウンス）時のみ速度上限を設け、時間とともに上限を下げて必ず停止させる
+      const bouncing=cushionE>CUSHION_E+1e-6;
+      const bcap=bouncing?MAX_POWER*1.2*Math.pow(0.992,step):Infinity;
+      if(b.x<PL+rr){b.x=PL+rr;sp=Math.abs(b.vx);b.vx=-Math.sign(b.vx)*Math.min(Math.abs(b.vx)*cushionE,bcap);hit=1;}
+      if(b.x>PR-rr){b.x=PR-rr;sp=Math.abs(b.vx);b.vx=-Math.sign(b.vx)*Math.min(Math.abs(b.vx)*cushionE,bcap);hit=1;}
+      if(b.y<PT+rr){b.y=PT+rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-Math.sign(b.vy)*Math.min(Math.abs(b.vy)*cushionE,bcap);hit=1;}
+      if(b.y>PB-rr){b.y=PB-rr;sp=Math.max(sp,Math.abs(b.vy));b.vy=-Math.sign(b.vy)*Math.min(Math.abs(b.vy)*cushionE,bcap);hit=1;}
       if(hit&&sp>1.6)ev.sounds.push({f:step,type:"rail",v:Math.min(1,sp/12)});
     }
     // ボール間衝突（手球はビッグ時に半径が大きい）
@@ -664,6 +688,7 @@ function applyResult(res){
   updateHUD();setCenter(res);
   if(gameMode==="ultimate9"&&currentAnomaly&&!gameOver){
     setCenterText("⚡ 異常発生："+currentAnomaly.name+"（"+currentAnomaly.desc+"）");
+    showAnomalyCutin(currentAnomaly);
   }
   if(role==="solo"&&!gameOver&&current===1){if(!currentAnomaly)setCenterText("CPU が狙っています…");setTimeout(aiTakeShot,750);}
   if(role==="test"&&!gameOver){
@@ -833,11 +858,13 @@ function canPlaceCue(x,y){
   return true;
 }
 cv.addEventListener("mousedown",onDown);
-cv.addEventListener("mousemove",onMove);
+window.addEventListener("mousemove",onMove);
 window.addEventListener("mouseup",onUp);
 cv.addEventListener("touchstart",onDown,{passive:false});
-cv.addEventListener("touchmove",onMove,{passive:false});
-cv.addEventListener("touchend",onUp,{passive:false});
+// 指が盤外に出てもドラッグを追跡・完了できるよう window で受ける
+window.addEventListener("touchmove",onMove,{passive:false});
+window.addEventListener("touchend",onUp,{passive:false});
+window.addEventListener("touchcancel",()=>{aim.active=false;placing=false;},{passive:false});
 
 function doShot(angle,power){
   if(ballInHand)ballInHand=false;
@@ -1239,6 +1266,29 @@ function sfxNoise(t,dur,freq,vol){
   const bp=actx.createBiquadFilter();bp.type="bandpass";bp.frequency.value=freq;bp.Q.value=0.8;
   const g=actx.createGain();g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.001,t+dur);
   n.connect(bp);bp.connect(g);g.connect(sfxGain);n.start(t);n.stop(t+dur+0.02);
+}
+// 異常発動のカットイン演出
+function sfxCutin(){
+  if(!actx||!sfxOn)return;
+  const t=actx.currentTime;
+  const o=actx.createOscillator(),g=actx.createGain();
+  o.type="sawtooth";o.frequency.setValueAtTime(240,t);o.frequency.exponentialRampToValueAtTime(70,t+0.26);
+  g.gain.setValueAtTime(0.2,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.4);
+  o.connect(g);g.connect(sfxGain);o.start(t);o.stop(t+0.42);
+  const o2=actx.createOscillator(),g2=actx.createGain();
+  o2.type="triangle";o2.frequency.setValueAtTime(420,t+0.04);o2.frequency.exponentialRampToValueAtTime(1300,t+0.3);
+  g2.gain.setValueAtTime(0,t+0.04);g2.gain.linearRampToValueAtTime(0.11,t+0.12);g2.gain.exponentialRampToValueAtTime(0.001,t+0.34);
+  o2.connect(g2);g2.connect(sfxGain);o2.start(t+0.04);o2.stop(t+0.36);
+  sfxNoise(t,0.07,1300,0.1);
+}
+function showAnomalyCutin(an){
+  if(!an)return;
+  const c=document.getElementById("cutin");if(!c)return;
+  document.getElementById("cutinName").textContent=an.name;
+  document.getElementById("cutinDesc").textContent=an.desc;
+  c.classList.remove("show");void c.offsetWidth;c.classList.add("show"); // reflowでアニメ再生
+  try{sfxCutin();}catch(e){}
+  clearTimeout(c._t);c._t=setTimeout(()=>c.classList.remove("show"),2000);
 }
 // トグル
 document.getElementById("btnMusic").addEventListener("click",()=>{
